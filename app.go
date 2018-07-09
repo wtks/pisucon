@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"regexp"
 	"strconv"
@@ -19,17 +18,30 @@ import (
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
-	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
+	"github.com/bradleypeabody/gorilla-sessions-memcache"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	"github.com/zenazn/goji"
 	"github.com/zenazn/goji/web"
+	"crypto/sha512"
 )
 
 var (
 	db    *sqlx.DB
 	store *gsm.MemcacheStore
+
+	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
+	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
+
+	fmap         = template.FuncMap{"imageURL": imageURL}
+	loginTmpl    = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("login.html")))
+	registerTmpl = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("register.html")))
+	bannedTmpl   = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("banned.html")))
+	postTmpl     = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("post_id.html"), getTemplPath("post.html")))
+	postsTmpl    = template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(getTemplPath("posts.html"), getTemplPath("post.html")))
+	indexTmpl    = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("index.html"), getTemplPath("posts.html"), getTemplPath("post.html")))
+	userTmpl     = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("user.html"), getTemplPath("posts.html"), getTemplPath("post.html")))
 )
 
 const (
@@ -92,15 +104,15 @@ func dbInitialize() {
 }
 
 func tryLogin(accountName, password string) *User {
-	u := User{}
-	err := db.Get(&u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0", accountName)
+	u := &User{}
+	err := db.Get(u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0 LIMIT 1", accountName)
 	if err != nil {
 		return nil
 	}
 
-	if &u != nil && calculatePasshash(u.AccountName, password) == u.Passhash {
-		return &u
-	} else if &u == nil {
+	if u != nil && calculatePasshash(u.AccountName, password) == u.Passhash {
+		return u
+	} else if u == nil {
 		return nil
 	} else {
 		return nil
@@ -108,38 +120,15 @@ func tryLogin(accountName, password string) *User {
 }
 
 func validateUser(accountName, password string) bool {
-	if !(regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z").MatchString(accountName) &&
-		regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z").MatchString(password)) {
-		return false
-	}
-
-	return true
-}
-
-// 今回のGo実装では言語側のエスケープの仕組みが使えないのでOSコマンドインジェクション対策できない
-// 取り急ぎPHPのescapeshellarg関数を参考に自前で実装
-// cf: http://jp2.php.net/manual/ja/function.escapeshellarg.php
-func escapeshellarg(arg string) string {
-	return "'" + strings.Replace(arg, "'", "'\\''", -1) + "'"
+	return usernameRegexp.MatchString(accountName) && passwordRegexp.MatchString(password)
 }
 
 func digest(src string) string {
-	// opensslのバージョンによっては (stdin)= というのがつくので取る
-	out, err := exec.Command("/bin/bash", "-c", `printf "%s" `+escapeshellarg(src)+` | openssl dgst -sha512 | sed 's/^.*= //'`).Output()
-	if err != nil {
-		fmt.Println(err)
-		return ""
-	}
-
-	return strings.TrimSuffix(string(out), "\n")
-}
-
-func calculateSalt(accountName string) string {
-	return digest(accountName)
+	return hex.EncodeToString(sha512.Sum512([]byte(src))[:])
 }
 
 func calculatePasshash(accountName, password string) string {
-	return digest(password + ":" + calculateSalt(accountName))
+	return digest(password + ":" + digest(accountName))
 }
 
 func getSession(r *http.Request) *sessions.Session {
@@ -148,18 +137,17 @@ func getSession(r *http.Request) *sessions.Session {
 	return session
 }
 
-func getSessionUser(r *http.Request) User {
+func getSessionUser(r *http.Request) *User {
 	session := getSession(r)
 	uid, ok := session.Values["user_id"]
 	if !ok || uid == nil {
-		return User{}
+		return nil
 	}
 
-	u := User{}
-
-	err := db.Get(&u, "SELECT * FROM `users` WHERE `id` = ?", uid)
+	u := &User{}
+	err := db.Get(u, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", uid)
 	if err != nil {
-		return User{}
+		return nil
 	}
 
 	return u
@@ -242,8 +230,8 @@ func imageURL(p Post) string {
 	return "/image/" + strconv.Itoa(p.ID) + ext
 }
 
-func isLogin(u User) bool {
-	return u.ID != 0
+func isLogin(u *User) bool {
+	return u != nil
 }
 
 func getCSRFToken(r *http.Request) string {
@@ -280,11 +268,8 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("login.html")),
-	).Execute(w, struct {
-		Me    User
+	loginTmpl.Execute(w, struct {
+		Me    *User
 		Flash string
 	}{me, getFlash(w, r, "notice")})
 }
@@ -297,15 +282,14 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 
 	u := tryLogin(r.FormValue("account_name"), r.FormValue("password"))
 
+	session := getSession(r)
 	if u != nil {
-		session := getSession(r)
 		session.Values["user_id"] = u.ID
 		session.Values["csrf_token"] = secureRandomStr(16)
 		session.Save(r, w)
 
 		http.Redirect(w, r, "/", http.StatusFound)
 	} else {
-		session := getSession(r)
 		session.Values["notice"] = "アカウント名かパスワードが間違っています"
 		session.Save(r, w)
 
@@ -319,10 +303,7 @@ func getRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("register.html")),
-	).Execute(w, struct {
+	registerTmpl.Execute(w, struct {
 		Me    User
 		Flash string
 	}{User{}, getFlash(w, r, "notice")})
@@ -348,7 +329,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 
 	exists := 0
 	// ユーザーが存在しない場合はエラーになるのでエラーチェックはしない
-	db.Get(&exists, "SELECT 1 FROM users WHERE `account_name` = ?", accountName)
+	db.Get(&exists, "SELECT 1 FROM users WHERE `account_name` = ? LIMIT 1", accountName)
 
 	if exists == 1 {
 		session := getSession(r)
@@ -359,8 +340,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)"
-	result, eerr := db.Exec(query, accountName, calculatePasshash(accountName, password))
+	result, eerr := db.Exec("INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)", accountName, calculatePasshash(accountName, password))
 	if eerr != nil {
 		fmt.Println(eerr.Error())
 		return
@@ -405,26 +385,17 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("index.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	indexTmpl.Execute(w, struct {
 		Posts     []Post
-		Me        User
+		Me        *User
 		CSRFToken string
 		Flash     string
 	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
 }
 
 func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
-	user := User{}
-	uerr := db.Get(&user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0", c.URLParams["accountName"])
+	user := &User{}
+	uerr := db.Get(user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0 LIMIT 1", c.URLParams["accountName"])
 
 	if uerr != nil {
 		fmt.Println(uerr)
@@ -488,22 +459,13 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("user.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	userTmpl.Execute(w, struct {
 		Posts          []Post
-		User           User
+		User           *User
 		PostCount      int
 		CommentCount   int
 		CommentedCount int
-		Me             User
+		Me             *User
 	}{posts, user, postCount, commentCount, commentedCount, me})
 }
 
@@ -543,14 +505,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, posts)
+	postsTmpl.Execute(w, posts)
 }
 
 func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
@@ -561,7 +516,7 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	rerr := db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	rerr := db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ? LIMIT 1", pid)
 	if rerr != nil {
 		fmt.Println(rerr)
 		return
@@ -578,22 +533,10 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := posts[0]
-
-	me := getSessionUser(r)
-
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("post_id.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	postTmpl.Execute(w, struct {
 		Post Post
-		Me   User
-	}{p, me})
+		Me   *User
+	}{posts[0], getSessionUser(r)})
 }
 
 func postIndex(w http.ResponseWriter, r *http.Request) {
@@ -652,14 +595,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)"
-	result, eerr := db.Exec(
-		query,
-		me.ID,
-		mime,
-		filedata,
-		r.FormValue("body"),
-	)
+	result, eerr := db.Exec("INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)", me.ID, mime, filedata, r.FormValue("body"))
 	if eerr != nil {
 		fmt.Println(eerr.Error())
 		return
@@ -724,8 +660,7 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)"
-	db.Exec(query, postID, me.ID, r.FormValue("comment"))
+	db.Exec("INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)", postID, me.ID, r.FormValue("comment"))
 
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
@@ -742,19 +677,16 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users := []User{}
+	var users []*User
 	err := db.Select(&users, "SELECT * FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("banned.html")),
-	).Execute(w, struct {
-		Users     []User
-		Me        User
+	bannedTmpl.Execute(w, struct {
+		Users     []*User
+		Me        *User
 		CSRFToken string
 	}{users, me, getCSRFToken(r)})
 }
@@ -776,29 +708,18 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "UPDATE `users` SET `del_flg` = ? WHERE `id` = ?"
-
 	r.ParseForm()
-	for _, id := range r.Form["uid[]"] {
-		db.Exec(query, 1, id)
+	q, vs, err := sqlx.In("UPDATE `users` SET `del_flg` = 1 WHERE `id` IN (?)", r.Form["uid[]"])
+	if err != nil {
+		panic(err)
 	}
+
+	db.Exec(q, vs...)
 
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
 func main() {
-	host := os.Getenv("ISUCONP_DB_HOST")
-	if host == "" {
-		host = "localhost"
-	}
-	port := os.Getenv("ISUCONP_DB_PORT")
-	if port == "" {
-		port = "3306"
-	}
-	_, err := strconv.Atoi(port)
-	if err != nil {
-		log.Fatalf("Failed to read DB port number from an environment variable ISUCONP_DB_PORT.\nError: %s", err.Error())
-	}
 	user := os.Getenv("ISUCONP_DB_USER")
 	if user == "" {
 		user = "root"
@@ -816,7 +737,7 @@ func main() {
 		dbname,
 	)
 
-	db, err = sqlx.Open("mysql", dsn)
+	db, err := sqlx.Open("mysql", dsn)
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
