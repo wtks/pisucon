@@ -318,6 +318,9 @@ func GetLogout(w http.ResponseWriter, r *http.Request) {
 func GetIndex(w http.ResponseWriter, r *http.Request) {
 	s := getSession(r)
 	me := getSessionUser(s)
+	if me == nil {
+		me = &User{}
+	}
 
 	var posts []*Post
 	err := db.Select(&posts, getPostsQuery+" WHERE users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20")
@@ -396,6 +399,10 @@ func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	me := getSessionUser(s)
+	if me == nil {
+		me = &User{}
+	}
 	userTmpl.Execute(w, struct {
 		Posts          []*Post
 		User           User
@@ -403,7 +410,7 @@ func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 		CommentCount   int
 		CommentedCount int
 		Me             User
-	}{results, *user, postCount, commentCount, commentedCount, *getSessionUser(s)})
+	}{results, *user, postCount, commentCount, commentedCount, *me})
 }
 
 func GetPosts(w http.ResponseWriter, r *http.Request) {
@@ -463,10 +470,14 @@ func GetPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := getSessionUser(s)
+	if user == nil {
+		user = &User{}
+	}
 	postTmpl.Execute(w, struct {
 		Post *Post
 		Me   User
-	}{posts[0], *getSessionUser(s)})
+	}{posts[0], *user})
 }
 
 func PostIndex(w http.ResponseWriter, r *http.Request) {
