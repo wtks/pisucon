@@ -418,7 +418,7 @@ func GetPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var posts []*Post
-	if db.Select(&posts, getPostsQuery+" WHERE posts.created_at <= ? AND users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20", t.Format(ISO8601_FORMAT)) != nil {
+	if db.Select(&posts, getPostsQuery+" WHERE posts.created_at <= ? ORDER BY posts.created_at DESC LIMIT 20", t.Format(ISO8601_FORMAT)) != nil {
 		return
 	}
 	if len(posts) == 0 {
@@ -489,12 +489,16 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mime := header.Header["Content-Type"][0]
+	ext := ""
 	switch {
 	case strings.HasSuffix(mime, "jpeg"):
+		ext = "jpg"
 		break
 	case strings.HasSuffix(mime, "png"):
+		ext = "png"
 		break
 	case strings.HasSuffix(mime, "gif"):
+		ext = "gif"
 		break
 	default:
 		s.Values["notice"] = "投稿できる画像形式はjpgとpngとgifだけです"
@@ -517,7 +521,7 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, eerr := db.Exec("INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)", me.ID, mime, filedata, r.FormValue("body"))
+	result, eerr := db.Exec("INSERT INTO `posts` (`user_id`, `mime`, `body`) VALUES (?,?,?,?)", me.ID, mime, r.FormValue("body"))
 	if eerr != nil {
 		fmt.Println(eerr.Error())
 		return
@@ -527,6 +531,10 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 	if lerr != nil {
 		fmt.Println(lerr.Error())
 		return
+	}
+
+	if err := ioutil.WriteFile(fmt.Sprintf("../public/image/%d.%s", pid, ext), filedata, os.ModePerm); err != nil {
+		panic(err)
 	}
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
@@ -553,6 +561,7 @@ func GetImage(c web.C, w http.ResponseWriter, r *http.Request) {
 	if ext == "jpg" && post.Mime == "image/jpeg" ||
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
+		ioutil.WriteFile(fmt.Sprintf("../public/image/%d.%s", post.ID, ext), post.Imgdata, os.ModePerm)
 		w.Header().Set("Content-Type", post.Mime)
 		w.Header().Set("Cache-Control", "max-age=31536000, public")
 		_, err := w.Write(post.Imgdata)
@@ -683,6 +692,6 @@ func main() {
 	goji.Post("/comment", PostComment)
 	goji.Get("/admin/banned", GetAdminBanned)
 	goji.Post("/admin/banned", PostAdminBanned)
-	goji.Get("/*", http.FileServer(http.Dir("../public")))
+	//goji.Get("/*", http.FileServer(http.Dir("../public"))) //nginxに任せる
 	goji.Serve()
 }
