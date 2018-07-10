@@ -632,6 +632,7 @@ func getImage(c web.C, w http.ResponseWriter, r *http.Request) {
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
 		w.Header().Set("Content-Type", post.Mime)
+		w.Header().Set("Cache-Control", "max-age=31536000, public")
 		_, err := w.Write(post.Imgdata)
 		if err != nil {
 			fmt.Println(err.Error())
