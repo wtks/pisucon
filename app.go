@@ -64,7 +64,7 @@ const (
 	// CSRF Token error
 	StatusUnprocessableEntity = 422
 
-	getPostsQuery = "SELECT post.id AS id, post.imgdata AS imgdata, post.body AS body, post.mime As mime, post.created_at AS created_at, users.account_name AS `u.account_name` FROM `posts` INNER JOIN users ON posts.user_id = users.id"
+	getPostsQuery = "SELECT posts.id AS id, posts.imgdata AS imgdata, posts.body AS body, posts.mime As mime, posts.created_at AS created_at, users.account_name AS `u.account_name` FROM posts INNER JOIN users ON posts.user_id = users.id"
 )
 
 type User struct {
