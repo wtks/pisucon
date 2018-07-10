@@ -521,7 +521,7 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, eerr := db.Exec("INSERT INTO `posts` (`user_id`, `mime`, `body`) VALUES (?,?,?,?)", me.ID, mime, r.FormValue("body"))
+	result, eerr := db.Exec("INSERT INTO `posts` (`user_id`, `mime`, `body`) VALUES (?,?,?)", me.ID, mime, r.FormValue("body"))
 	if eerr != nil {
 		fmt.Println(eerr.Error())
 		return
