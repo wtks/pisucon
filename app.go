@@ -25,11 +25,14 @@ import (
 	"github.com/zenazn/goji"
 	"github.com/zenazn/goji/web"
 	"crypto/sha512"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
 	db    *sqlx.DB
 	store *gsm.MemcacheStore
+
+	group singleflight.Group
 
 	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
 	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
@@ -320,16 +323,28 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 		me = &User{}
 	}
 
-	var posts []*Post
-	if err := db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20"); err != nil {
+	token := getCSRFToken(s)
+
+	v, err, _ := group.Do("index", func() (interface{}, error) {
+		var posts []*Post
+		if err := db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20"); err != nil {
+			return nil, err
+		}
+		if err := makePosts(posts, "", false); err != nil {
+			return nil, err
+		}
+		return posts, nil
+	})
+	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	token := getCSRFToken(s)
-	if err := makePosts(posts, token, false); err != nil {
-		fmt.Println(err)
-		return
+	posts := make([]*Post, len(v.([]*Post)))
+	for i, v := range v.([]*Post) {
+		p := *v
+		p.CSRFToken = token
+		posts[i] =  &p
 	}
 
 	indexTmpl.Execute(w, struct {
@@ -537,6 +552,7 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 
+	group.Forget("index")
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 	return
 }
@@ -595,6 +611,7 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 
 	db.Exec("INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)", postID, me.ID, r.FormValue("comment"))
 
+	group.Forget("index")
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
@@ -649,6 +666,7 @@ func PostAdminBanned(w http.ResponseWriter, r *http.Request) {
 
 	db.Exec(q, vs...)
 
+	group.Forget("index")
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
