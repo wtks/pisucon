@@ -17,8 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
-	"github.com/bradleypeabody/gorilla-sessions-memcache"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
@@ -26,11 +24,12 @@ import (
 	"github.com/zenazn/goji/web"
 	"crypto/sha512"
 	"golang.org/x/sync/singleflight"
+	"github.com/quasoft/memstore"
 )
 
 var (
 	db    *sqlx.DB
-	store *gsm.MemcacheStore
+	store *memstore.MemStore
 
 	group singleflight.Group
 
@@ -102,8 +101,7 @@ type Comment struct {
 }
 
 func init() {
-	memcacheClient := memcache.New("localhost:11211")
-	store = gsm.NewMemcacheStore(memcacheClient, "isucogram_", []byte("sendagaya"))
+	store = memstore.NewMemStore([]byte("sendagaya"))
 }
 
 func digest(src string) string {
@@ -147,7 +145,7 @@ func getFlash(s *sessions.Session, w http.ResponseWriter, r *http.Request, key s
 
 func makePosts(results []*Post, CSRFToken string, allComments bool) error {
 	for _, p := range results {
-		query := "SELECT comments.id AS id, comments.comment AS `comment`, comments.created_at AS created_at, users.account_name AS `u.account_name` FROM `comments` INNER JOIN `users` ON `users`.`id` = `comments`.`user_id` WHERE `comments`.`post_id` = ? ORDER BY `comments`.`created_at`"
+		query := "SELECT comments.id AS id, comments.comment AS `comment`, comments.created_at AS created_at, users.account_name AS `u.account_name` FROM `comments` INNER JOIN `users` ON `users`.`id` = `comments`.`user_id` AND `comments`.`post_id` = ? ORDER BY `comments`.`created_at`"
 		if !allComments {
 			query += " LIMIT 3"
 		}
