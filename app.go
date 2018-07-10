@@ -739,7 +739,8 @@ func main() {
 		dbname,
 	)
 
-	db, err := sqlx.Open("mysql", dsn)
+	var err error
+	db, err = sqlx.Open("mysql", dsn)
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
