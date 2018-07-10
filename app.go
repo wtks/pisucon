@@ -228,9 +228,7 @@ func PostLogin(w http.ResponseWriter, r *http.Request) {
 
 	accountName, password := r.FormValue("account_name"), r.FormValue("password")
 	u := &User{}
-	if err := db.Get(u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0 LIMIT 1", accountName); err != nil {
-		return
-	}
+	db.Get(u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0 LIMIT 1", accountName)
 
 	if calculatePasshash(u.AccountName, password) != u.Passhash {
 		s.Values["notice"] = "アカウント名かパスワードが間違っています"
