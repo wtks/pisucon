@@ -37,27 +37,13 @@ var (
 	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
 	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
 
-	fmap = template.FuncMap{"imageURL": func(p Post) string {
-		ext := ""
-		switch p.Mime {
-		case "image/jpeg":
-			ext = ".jpg"
-		case "image/png":
-			ext = ".png"
-		case "image/gif":
-			ext = ".gif"
-		}
-
-		return "/image/" + strconv.Itoa(p.ID) + ext
-	},
-	}
 	loginTmpl    = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("login.html")))
 	registerTmpl = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("register.html")))
 	bannedTmpl   = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("banned.html")))
-	postTmpl     = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("post_id.html"), getTemplPath("post.html")))
-	postsTmpl    = template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(getTemplPath("posts.html"), getTemplPath("post.html")))
-	indexTmpl    = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("index.html"), getTemplPath("posts.html"), getTemplPath("post.html")))
-	userTmpl     = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("user.html"), getTemplPath("posts.html"), getTemplPath("post.html")))
+	postTmpl     = template.Must(template.New("layout.html").ParseFiles(getTemplPath("layout.html"), getTemplPath("post_id.html"), getTemplPath("post.html")))
+	postsTmpl    = template.Must(template.New("posts.html").ParseFiles(getTemplPath("posts.html"), getTemplPath("post.html")))
+	indexTmpl    = template.Must(template.New("layout.html").ParseFiles(getTemplPath("layout.html"), getTemplPath("index.html"), getTemplPath("posts.html"), getTemplPath("post.html")))
+	userTmpl     = template.Must(template.New("layout.html").ParseFiles(getTemplPath("layout.html"), getTemplPath("user.html"), getTemplPath("posts.html"), getTemplPath("post.html")))
 )
 
 const (
@@ -199,6 +185,9 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 		"DELETE FROM comments WHERE id > 100000",
 		"UPDATE users SET del_flg = 0",
 		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
+		//"UPDATE posts SET mime = 'jpg' WHERE mime = 'image/jpeg'",
+		//"UPDATE posts SET mime = 'png' WHERE mime = 'image/png'",
+		//"UPDATE posts SET mime = 'gif' WHERE mime = 'image/gif'",
 	}
 
 	for _, sql := range sqls {
@@ -536,7 +525,7 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, eerr := db.Exec("INSERT INTO `posts` (`user_id`, `mime`, `body`) VALUES (?,?,?)", me.ID, mime, r.FormValue("body"))
+	result, eerr := db.Exec("INSERT INTO `posts` (`user_id`, `mime`, `body`) VALUES (?,?,?)", me.ID, ext, r.FormValue("body"))
 	if eerr != nil {
 		fmt.Println(eerr.Error())
 		return
@@ -574,11 +563,16 @@ func GetImage(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	ext := c.URLParams["ext"]
 
-	if ext == "jpg" && post.Mime == "image/jpeg" ||
-		ext == "png" && post.Mime == "image/png" ||
-		ext == "gif" && post.Mime == "image/gif" {
+	if ext == post.Mime {
 		ioutil.WriteFile(fmt.Sprintf("../public/image/%d.%s", post.ID, ext), post.Imgdata, os.ModePerm)
-		w.Header().Set("Content-Type", post.Mime)
+		switch ext {
+		case "jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+		case "png":
+			w.Header().Set("Content-Type", "image/png")
+		case "gif":
+			w.Header().Set("Content-Type", "image/gif")
+		}
 		w.Header().Set("Cache-Control", "max-age=31536000, public")
 		_, err := w.Write(post.Imgdata)
 		if err != nil {
