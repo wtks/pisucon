@@ -64,7 +64,7 @@ const (
 	// CSRF Token error
 	StatusUnprocessableEntity = 422
 
-	getPostsQuery = "SELECT posts.id AS id, posts.imgdata AS imgdata, posts.body AS body, posts.mime As mime, posts.created_at AS created_at, users.account_name AS `u.account_name` FROM posts INNER JOIN users ON posts.user_id = users.id"
+	getPostsQuery = "SELECT posts.id AS id, posts.body AS body, posts.mime As mime, posts.created_at AS created_at, users.account_name AS `u.account_name` FROM posts INNER JOIN users ON posts.user_id = users.id AND users.del_flg = 0"
 )
 
 type User struct {
@@ -323,8 +323,7 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var posts []*Post
-	err := db.Select(&posts, getPostsQuery+" WHERE users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20")
-	if err != nil {
+	if err := db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20"); err != nil {
 		fmt.Println(err)
 		return
 	}
@@ -355,11 +354,7 @@ func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	}
 
 	var results []*Post
-	if err := db.Select(&results, getPostsQuery+" WHERE posts.user_id = ? ORDER BY posts.created_at DESC LIMIT 20", user.ID); err != nil {
-		fmt.Println(err)
-		return
-	}
-
+	db.Select(&results, getPostsQuery+" WHERE posts.user_id = ? ORDER BY posts.created_at DESC LIMIT 20", user.ID)
 	s := getSession(r)
 	if err := makePosts(results, getCSRFToken(s), false); err != nil {
 		fmt.Println(err)
@@ -367,16 +362,10 @@ func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	}
 
 	commentCount := 0
-	if err := db.Get(&commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID); err != nil {
-		fmt.Println(err)
-		return
-	}
+	db.Get(&commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
 
 	var postIDs []int
-	if err := db.Select(&postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID); err != nil {
-		fmt.Println(err)
-		return
-	}
+	db.Select(&postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
 	postCount := len(postIDs)
 
 	commentedCount := 0
@@ -455,7 +444,7 @@ func GetPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 	}
 
 	var posts []*Post
-	if db.Select(&posts, getPostsQuery+" WHERE posts.id = ? AND users.del_flg = 0 LIMIT 1", pid) != nil {
+	if db.Select(&posts, getPostsQuery+" WHERE posts.id = ? LIMIT 1", pid) != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
