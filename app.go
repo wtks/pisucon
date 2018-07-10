@@ -270,9 +270,9 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loginTmpl.Execute(w, struct {
-		Me    *User
+		Me    User
 		Flash string
-	}{me, getFlash(w, r, "notice")})
+	}{*me, getFlash(w, r, "notice")})
 }
 
 func postLogin(w http.ResponseWriter, r *http.Request) {
@@ -388,10 +388,10 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	indexTmpl.Execute(w, struct {
 		Posts     []Post
-		Me        *User
+		Me        User
 		CSRFToken string
 		Flash     string
-	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
+	}{posts, *me, getCSRFToken(r), getFlash(w, r, "notice")})
 }
 
 func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
@@ -462,12 +462,12 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	userTmpl.Execute(w, struct {
 		Posts          []Post
-		User           *User
+		User           User
 		PostCount      int
 		CommentCount   int
 		CommentedCount int
-		Me             *User
-	}{posts, user, postCount, commentCount, commentedCount, me})
+		Me             User
+	}{posts, *user, postCount, commentCount, commentedCount, *me})
 }
 
 func getPosts(w http.ResponseWriter, r *http.Request) {
@@ -536,8 +536,8 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	postTmpl.Execute(w, struct {
 		Post Post
-		Me   *User
-	}{posts[0], getSessionUser(r)})
+		Me   User
+	}{posts[0], *getSessionUser(r)})
 }
 
 func postIndex(w http.ResponseWriter, r *http.Request) {
@@ -688,9 +688,9 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 
 	bannedTmpl.Execute(w, struct {
 		Users     []*User
-		Me        *User
+		Me        User
 		CSRFToken string
-	}{users, me, getCSRFToken(r)})
+	}{users, *me, getCSRFToken(r)})
 }
 
 func postAdminBanned(w http.ResponseWriter, r *http.Request) {
