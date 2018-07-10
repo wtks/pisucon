@@ -34,7 +34,20 @@ var (
 	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
 	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
 
-	fmap         = template.FuncMap{"imageURL": imageURL}
+	fmap = template.FuncMap{"imageURL": func(p Post) string {
+		ext := ""
+		switch p.Mime {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/png":
+			ext = ".png"
+		case "image/gif":
+			ext = ".gif"
+		}
+
+		return "/image/" + strconv.Itoa(p.ID) + ext
+	},
+	}
 	loginTmpl    = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("login.html")))
 	registerTmpl = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("register.html")))
 	bannedTmpl   = template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("banned.html")))
@@ -45,12 +58,13 @@ var (
 )
 
 const (
-	postsPerPage   = 20
 	ISO8601_FORMAT = "2006-01-02T15:04:05-07:00"
 	UploadLimit    = 10 * 1024 * 1024 // 10mb
 
 	// CSRF Token error
 	StatusUnprocessableEntity = 422
+
+	getPostsQuery = "SELECT post.id AS id, post.imgdata AS imgdata, post.body AS body, post.mime As mime, post.created_at AS created_at, users.account_name AS `u.account_name` FROM `posts` INNER JOIN users ON posts.user_id = users.id"
 )
 
 type User struct {
@@ -70,8 +84,8 @@ type Post struct {
 	Mime         string    `db:"mime"`
 	CreatedAt    time.Time `db:"created_at"`
 	CommentCount int
-	Comments     []Comment
-	User         User
+	Comments     []*Comment
+	User         User      `db:"u"`
 	CSRFToken    string
 }
 
@@ -81,46 +95,12 @@ type Comment struct {
 	UserID    int       `db:"user_id"`
 	Comment   string    `db:"comment"`
 	CreatedAt time.Time `db:"created_at"`
-	User      User
+	User      User      `db:"u"`
 }
 
 func init() {
 	memcacheClient := memcache.New("localhost:11211")
 	store = gsm.NewMemcacheStore(memcacheClient, "isucogram_", []byte("sendagaya"))
-}
-
-func dbInitialize() {
-	sqls := []string{
-		"DELETE FROM users WHERE id > 1000",
-		"DELETE FROM posts WHERE id > 10000",
-		"DELETE FROM comments WHERE id > 100000",
-		"UPDATE users SET del_flg = 0",
-		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
-	}
-
-	for _, sql := range sqls {
-		db.Exec(sql)
-	}
-}
-
-func tryLogin(accountName, password string) *User {
-	u := &User{}
-	err := db.Get(u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0 LIMIT 1", accountName)
-	if err != nil {
-		return nil
-	}
-
-	if u != nil && calculatePasshash(u.AccountName, password) == u.Passhash {
-		return u
-	} else if u == nil {
-		return nil
-	} else {
-		return nil
-	}
-}
-
-func validateUser(accountName, password string) bool {
-	return usernameRegexp.MatchString(accountName) && passwordRegexp.MatchString(password)
 }
 
 func digest(src string) string {
@@ -134,110 +114,63 @@ func calculatePasshash(accountName, password string) string {
 
 func getSession(r *http.Request) *sessions.Session {
 	session, _ := store.Get(r, "isuconp-go.session")
-
 	return session
 }
 
-func getSessionUser(r *http.Request) *User {
-	session := getSession(r)
-	uid, ok := session.Values["user_id"]
+func getSessionUser(s *sessions.Session) *User {
+	uid, ok := s.Values["user_id"]
 	if !ok || uid == nil {
 		return nil
 	}
 
 	u := &User{}
-	err := db.Get(u, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", uid)
-	if err != nil {
+	if db.Get(u, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", uid) != nil {
 		return nil
 	}
-
 	return u
 }
 
-func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
-	session := getSession(r)
-	value, ok := session.Values[key]
+func getFlash(s *sessions.Session, w http.ResponseWriter, r *http.Request, key string) string {
+	value, ok := s.Values[key]
 
 	if !ok || value == nil {
 		return ""
 	} else {
-		delete(session.Values, key)
-		session.Save(r, w)
+		delete(s.Values, key)
+		s.Save(r, w)
 		return value.(string)
 	}
 }
 
-func makePosts(results []Post, CSRFToken string, allComments bool) ([]Post, error) {
-	var posts []Post
-
+func makePosts(results []*Post, CSRFToken string, allComments bool) error {
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
+		query := "SELECT comments.id AS id, comments.comment AS `comment`, comments.created_at AS created_at, users.account_name AS `u.account_name` FROM `comments` INNER JOIN `users` ON `users`.`id` = `comments`.`user_id` WHERE `comments`.`post_id` = ? ORDER BY `comments`.`created_at`"
 		if !allComments {
 			query += " LIMIT 3"
 		}
-		var comments []Comment
-		cerr := db.Select(&comments, query, p.ID)
+
+		cerr := db.Select(&p.Comments, query, p.ID)
 		if cerr != nil {
-			return nil, cerr
+			return cerr
 		}
 
-		for i := 0; i < len(comments); i++ {
-			uerr := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if uerr != nil {
-				return nil, uerr
+		if allComments {
+			p.CommentCount = len(p.Comments)
+		} else {
+			err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+			if err != nil {
+				return err
 			}
 		}
 
-		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
-		}
-
-		p.Comments = comments
-
-		perr := db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if perr != nil {
-			return nil, perr
-		}
-
 		p.CSRFToken = CSRFToken
-
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
-		}
-		if len(posts) >= postsPerPage {
-			break
-		}
 	}
 
-	return posts, nil
+	return nil
 }
 
-func imageURL(p Post) string {
-	ext := ""
-	if p.Mime == "image/jpeg" {
-		ext = ".jpg"
-	} else if p.Mime == "image/png" {
-		ext = ".png"
-	} else if p.Mime == "image/gif" {
-		ext = ".gif"
-	}
-
-	return "/image/" + strconv.Itoa(p.ID) + ext
-}
-
-func isLogin(u *User) bool {
-	return u != nil
-}
-
-func getCSRFToken(r *http.Request) string {
-	session := getSession(r)
-	csrfToken, ok := session.Values["csrf_token"]
+func getCSRFToken(s *sessions.Session) string {
+	csrfToken, ok := s.Values["csrf_token"]
 	if !ok {
 		return ""
 	}
@@ -256,15 +189,26 @@ func getTemplPath(filename string) string {
 	return path.Join("templates", filename)
 }
 
-func getInitialize(w http.ResponseWriter, r *http.Request) {
-	dbInitialize()
+func GetInitialize(w http.ResponseWriter, r *http.Request) {
+	sqls := []string{
+		"DELETE FROM users WHERE id > 1000",
+		"DELETE FROM posts WHERE id > 10000",
+		"DELETE FROM comments WHERE id > 100000",
+		"UPDATE users SET del_flg = 0",
+		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
+	}
+
+	for _, sql := range sqls {
+		db.Exec(sql)
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
-func getLogin(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
-
-	if isLogin(me) {
+func GetLogin(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	me := getSessionUser(s)
+	if me != nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
@@ -272,34 +216,40 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 	loginTmpl.Execute(w, struct {
 		Me    User
 		Flash string
-	}{*me, getFlash(w, r, "notice")})
+	}{User{}, getFlash(s, w, r, "notice")})
 }
 
-func postLogin(w http.ResponseWriter, r *http.Request) {
-	if isLogin(getSessionUser(r)) {
+func PostLogin(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	if getSessionUser(s) != nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 
-	u := tryLogin(r.FormValue("account_name"), r.FormValue("password"))
+	accountName, password := r.FormValue("account_name"), r.FormValue("password")
+	u := &User{}
+	if err := db.Get(u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0 LIMIT 1", accountName); err != nil {
+		return
+	}
 
-	session := getSession(r)
-	if u != nil {
-		session.Values["user_id"] = u.ID
-		session.Values["csrf_token"] = secureRandomStr(16)
-		session.Save(r, w)
-
-		http.Redirect(w, r, "/", http.StatusFound)
-	} else {
-		session.Values["notice"] = "アカウント名かパスワードが間違っています"
-		session.Save(r, w)
+	if calculatePasshash(u.AccountName, password) != u.Passhash {
+		s.Values["notice"] = "アカウント名かパスワードが間違っています"
+		s.Save(r, w)
 
 		http.Redirect(w, r, "/login", http.StatusFound)
+		return
 	}
+
+	s.Values["user_id"] = u.ID
+	s.Values["csrf_token"] = secureRandomStr(16)
+	s.Save(r, w)
+
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func getRegister(w http.ResponseWriter, r *http.Request) {
-	if isLogin(getSessionUser(r)) {
+func GetRegister(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	if getSessionUser(s) != nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
@@ -307,22 +257,20 @@ func getRegister(w http.ResponseWriter, r *http.Request) {
 	registerTmpl.Execute(w, struct {
 		Me    User
 		Flash string
-	}{User{}, getFlash(w, r, "notice")})
+	}{User{}, getFlash(s, w, r, "notice")})
 }
 
-func postRegister(w http.ResponseWriter, r *http.Request) {
-	if isLogin(getSessionUser(r)) {
+func PostRegister(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	if getSessionUser(s) != nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 
 	accountName, password := r.FormValue("account_name"), r.FormValue("password")
-
-	validated := validateUser(accountName, password)
-	if !validated {
-		session := getSession(r)
-		session.Values["notice"] = "アカウント名は3文字以上、パスワードは6文字以上である必要があります"
-		session.Save(r, w)
+	if !(usernameRegexp.MatchString(accountName) && passwordRegexp.MatchString(password)) {
+		s.Values["notice"] = "アカウント名は3文字以上、パスワードは6文字以上である必要があります"
+		s.Save(r, w)
 
 		http.Redirect(w, r, "/register", http.StatusFound)
 		return
@@ -333,9 +281,8 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	db.Get(&exists, "SELECT 1 FROM users WHERE `account_name` = ? LIMIT 1", accountName)
 
 	if exists == 1 {
-		session := getSession(r)
-		session.Values["notice"] = "アカウント名がすでに使われています"
-		session.Save(r, w)
+		s.Values["notice"] = "アカウント名がすでに使われています"
+		s.Save(r, w)
 
 		http.Redirect(w, r, "/register", http.StatusFound)
 		return
@@ -347,99 +294,91 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := getSession(r)
 	uid, lerr := result.LastInsertId()
 	if lerr != nil {
 		fmt.Println(lerr.Error())
 		return
 	}
-	session.Values["user_id"] = uid
-	session.Values["csrf_token"] = secureRandomStr(16)
-	session.Save(r, w)
+	s.Values["user_id"] = uid
+	s.Values["csrf_token"] = secureRandomStr(16)
+	s.Save(r, w)
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func getLogout(w http.ResponseWriter, r *http.Request) {
-	session := getSession(r)
-	delete(session.Values, "user_id")
-	session.Options = &sessions.Options{MaxAge: -1}
-	session.Save(r, w)
+func GetLogout(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	delete(s.Values, "user_id")
+	s.Options = &sessions.Options{MaxAge: -1}
+	s.Save(r, w)
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func getIndex(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
+func GetIndex(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	me := getSessionUser(s)
 
-	results := []Post{}
-
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	var posts []*Post
+	err := db.Select(&posts, getPostsQuery+" WHERE users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	posts, merr := makePosts(results, getCSRFToken(r), false)
-	if merr != nil {
-		fmt.Println(merr)
+	token := getCSRFToken(s)
+	if err := makePosts(posts, token, false); err != nil {
+		fmt.Println(err)
 		return
 	}
 
 	indexTmpl.Execute(w, struct {
-		Posts     []Post
+		Posts     []*Post
 		Me        User
 		CSRFToken string
 		Flash     string
-	}{posts, *me, getCSRFToken(r), getFlash(w, r, "notice")})
+	}{posts, *me, token, getFlash(s, w, r, "notice")})
 }
 
-func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
+func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	user := &User{}
-	uerr := db.Get(user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0 LIMIT 1", c.URLParams["accountName"])
-
-	if uerr != nil {
-		fmt.Println(uerr)
+	if err := db.Get(user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0 LIMIT 1", c.URLParams["accountName"]); err != nil {
+		fmt.Println(err)
 		return
 	}
-
 	if user.ID == 0 {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	results := []Post{}
-
-	rerr := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
-	if rerr != nil {
-		fmt.Println(rerr)
+	var results []*Post
+	if err := db.Select(&results, getPostsQuery+" WHERE posts.user_id = ? ORDER BY posts.created_at DESC LIMIT 20", user.ID); err != nil {
+		fmt.Println(err)
 		return
 	}
 
-	posts, merr := makePosts(results, getCSRFToken(r), false)
-	if merr != nil {
-		fmt.Println(merr)
+	s := getSession(r)
+	if err := makePosts(results, getCSRFToken(s), false); err != nil {
+		fmt.Println(err)
 		return
 	}
 
 	commentCount := 0
-	cerr := db.Get(&commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
-	if cerr != nil {
-		fmt.Println(cerr)
+	if err := db.Get(&commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID); err != nil {
+		fmt.Println(err)
 		return
 	}
 
-	postIDs := []int{}
-	perr := db.Select(&postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
-	if perr != nil {
-		fmt.Println(perr)
+	var postIDs []int
+	if err := db.Select(&postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID); err != nil {
+		fmt.Println(err)
 		return
 	}
 	postCount := len(postIDs)
 
 	commentedCount := 0
 	if postCount > 0 {
-		s := []string{}
+		var s []string
 		for range postIDs {
 			s = append(s, "?")
 		}
@@ -451,26 +390,23 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 			args[i] = v
 		}
 
-		ccerr := db.Get(&commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
-		if ccerr != nil {
-			fmt.Println(ccerr)
+		if err := db.Get(&commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...); err != nil {
+			fmt.Println(err)
 			return
 		}
 	}
 
-	me := getSessionUser(r)
-
 	userTmpl.Execute(w, struct {
-		Posts          []Post
+		Posts          []*Post
 		User           User
 		PostCount      int
 		CommentCount   int
 		CommentedCount int
 		Me             User
-	}{posts, *user, postCount, commentCount, commentedCount, *me})
+	}{results, *user, postCount, commentCount, commentedCount, *getSessionUser(s)})
 }
 
-func getPosts(w http.ResponseWriter, r *http.Request) {
+func GetPosts(w http.ResponseWriter, r *http.Request) {
 	m, parseErr := url.ParseQuery(r.URL.RawQuery)
 	if parseErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -481,105 +417,93 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	if maxCreatedAt == "" {
 		return
 	}
-
 	t, terr := time.Parse(ISO8601_FORMAT, maxCreatedAt)
 	if terr != nil {
 		fmt.Println(terr)
 		return
 	}
 
-	results := []Post{}
-	rerr := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601_FORMAT))
-	if rerr != nil {
-		fmt.Println(rerr)
+	var posts []*Post
+	if db.Select(&posts, getPostsQuery+" WHERE posts.created_at <= ? AND users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20", t.Format(ISO8601_FORMAT)) != nil {
 		return
 	}
-
-	posts, merr := makePosts(results, getCSRFToken(r), false)
-	if merr != nil {
-		fmt.Println(merr)
-		return
-	}
-
 	if len(posts) == 0 {
 		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if err := makePosts(posts, getCSRFToken(getSession(r)), false); err != nil {
+		fmt.Println(err)
 		return
 	}
 
 	postsTmpl.Execute(w, posts)
 }
 
-func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
+func GetPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 	pid, err := strconv.Atoi(c.URLParams["id"])
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	results := []Post{}
-	rerr := db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ? LIMIT 1", pid)
-	if rerr != nil {
-		fmt.Println(rerr)
+	var posts []*Post
+	if db.Select(&posts, getPostsQuery+" WHERE posts.id = ? AND users.del_flg = 0 LIMIT 1", pid) != nil {
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-
-	posts, merr := makePosts(results, getCSRFToken(r), true)
-	if merr != nil {
-		fmt.Println(merr)
-		return
-	}
-
 	if len(posts) == 0 {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	postTmpl.Execute(w, struct {
-		Post Post
-		Me   User
-	}{posts[0], *getSessionUser(r)})
-}
-
-func postIndex(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
-	if !isLogin(me) {
-		http.Redirect(w, r, "/login", http.StatusFound)
+	s := getSession(r)
+	if err := makePosts(posts, getCSRFToken(s), true); err != nil {
+		fmt.Println(err)
 		return
 	}
 
-	if r.FormValue("csrf_token") != getCSRFToken(r) {
+	postTmpl.Execute(w, struct {
+		Post *Post
+		Me   User
+	}{posts[0], *getSessionUser(s)})
+}
+
+func PostIndex(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	me := getSessionUser(s)
+	if me == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if r.FormValue("csrf_token") != getCSRFToken(s) {
 		w.WriteHeader(StatusUnprocessableEntity)
 		return
 	}
 
 	file, header, ferr := r.FormFile("file")
 	if ferr != nil {
-		session := getSession(r)
-		session.Values["notice"] = "画像が必須です"
-		session.Save(r, w)
+		s.Values["notice"] = "画像が必須です"
+		s.Save(r, w)
 
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 
-	mime := ""
-	if file != nil {
-		// 投稿のContent-Typeからファイルのタイプを決定する
-		contentType := header.Header["Content-Type"][0]
-		if strings.Contains(contentType, "jpeg") {
-			mime = "image/jpeg"
-		} else if strings.Contains(contentType, "png") {
-			mime = "image/png"
-		} else if strings.Contains(contentType, "gif") {
-			mime = "image/gif"
-		} else {
-			session := getSession(r)
-			session.Values["notice"] = "投稿できる画像形式はjpgとpngとgifだけです"
-			session.Save(r, w)
+	mime := header.Header["Content-Type"][0]
+	switch {
+	case strings.HasSuffix(mime, "jpeg"):
+		break
+	case strings.HasSuffix(mime, "png"):
+		break
+	case strings.HasSuffix(mime, "gif"):
+		break
+	default:
+		s.Values["notice"] = "投稿できる画像形式はjpgとpngとgifだけです"
+		s.Save(r, w)
 
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
-		}
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
 	}
 
 	filedata, rerr := ioutil.ReadAll(file)
@@ -588,9 +512,8 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(filedata) > UploadLimit {
-		session := getSession(r)
-		session.Values["notice"] = "ファイルサイズが大きすぎます"
-		session.Save(r, w)
+		s.Values["notice"] = "ファイルサイズが大きすぎます"
+		s.Save(r, w)
 
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
@@ -612,7 +535,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func getImage(c web.C, w http.ResponseWriter, r *http.Request) {
+func GetImage(c web.C, w http.ResponseWriter, r *http.Request) {
 	pidStr := c.URLParams["id"]
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
@@ -644,14 +567,15 @@ func getImage(c web.C, w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-func postComment(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
-	if !isLogin(me) {
+func PostComment(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	me := getSessionUser(s)
+	if me == nil {
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
 
-	if r.FormValue("csrf_token") != getCSRFToken(r) {
+	if r.FormValue("csrf_token") != getCSRFToken(s) {
 		w.WriteHeader(StatusUnprocessableEntity)
 		return
 	}
@@ -667,13 +591,13 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
-func getAdminBanned(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
-	if !isLogin(me) {
+func GetAdminBanned(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	me := getSessionUser(s)
+	if me == nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-
 	if me.Authority == 0 {
 		w.WriteHeader(http.StatusForbidden)
 		return
@@ -690,22 +614,22 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 		Users     []*User
 		Me        User
 		CSRFToken string
-	}{users, *me, getCSRFToken(r)})
+	}{users, *me, getCSRFToken(s)})
 }
 
-func postAdminBanned(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
-	if !isLogin(me) {
+func PostAdminBanned(w http.ResponseWriter, r *http.Request) {
+	s := getSession(r)
+	me := getSessionUser(s)
+	if me == nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-
 	if me.Authority == 0 {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 
-	if r.FormValue("csrf_token") != getCSRFToken(r) {
+	if r.FormValue("csrf_token") != getCSRFToken(s) {
 		w.WriteHeader(StatusUnprocessableEntity)
 		return
 	}
@@ -746,21 +670,21 @@ func main() {
 	}
 	defer db.Close()
 
-	goji.Get("/initialize", getInitialize)
-	goji.Get("/login", getLogin)
-	goji.Post("/login", postLogin)
-	goji.Get("/register", getRegister)
-	goji.Post("/register", postRegister)
-	goji.Get("/logout", getLogout)
-	goji.Get("/", getIndex)
-	goji.Get(regexp.MustCompile(`^/@(?P<accountName>[a-zA-Z]+)$`), getAccountName)
-	goji.Get("/posts", getPosts)
-	goji.Get("/posts/:id", getPostsID)
-	goji.Post("/", postIndex)
-	goji.Get("/image/:id.:ext", getImage)
-	goji.Post("/comment", postComment)
-	goji.Get("/admin/banned", getAdminBanned)
-	goji.Post("/admin/banned", postAdminBanned)
+	goji.Get("/initialize", GetInitialize)
+	goji.Get("/login", GetLogin)
+	goji.Post("/login", PostLogin)
+	goji.Get("/register", GetRegister)
+	goji.Post("/register", PostRegister)
+	goji.Get("/logout", GetLogout)
+	goji.Get("/", GetIndex)
+	goji.Get(regexp.MustCompile(`^/@(?P<accountName>[a-zA-Z]+)$`), GetAccountName)
+	goji.Get("/posts", GetPosts)
+	goji.Get("/posts/:id", GetPostsID)
+	goji.Post("/", PostIndex)
+	goji.Get("/image/:id.:ext", GetImage)
+	goji.Post("/comment", PostComment)
+	goji.Get("/admin/banned", GetAdminBanned)
+	goji.Post("/admin/banned", PostAdminBanned)
 	goji.Get("/*", http.FileServer(http.Dir("../public")))
 	goji.Serve()
 }
