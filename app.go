@@ -124,7 +124,8 @@ func validateUser(accountName, password string) bool {
 }
 
 func digest(src string) string {
-	return hex.EncodeToString(sha512.Sum512([]byte(src))[:])
+	sum512 := sha512.Sum512([]byte(src))
+	return hex.EncodeToString(sum512[:])
 }
 
 func calculatePasshash(accountName, password string) string {
