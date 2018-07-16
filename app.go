@@ -185,9 +185,9 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 		"DELETE FROM comments WHERE id > 100000",
 		"UPDATE users SET del_flg = 0",
 		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
-		// "UPDATE posts SET mime = 'jpg' WHERE mime = 'image/jpeg'",
-		// "UPDATE posts SET mime = 'png' WHERE mime = 'image/png'",
-		// "UPDATE posts SET mime = 'gif' WHERE mime = 'image/gif'",
+		//"UPDATE posts SET mime = 'jpg' WHERE mime = 'image/jpeg'",
+		//"UPDATE posts SET mime = 'png' WHERE mime = 'image/png'",
+		//"UPDATE posts SET mime = 'gif' WHERE mime = 'image/gif'",
 	}
 
 	for _, sql := range sqls {
@@ -314,14 +314,26 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 
 	token := getCSRFToken(s)
 
-	var posts []*Post
-	if err := db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20"); err != nil {
+	v, err, _ := group.Do("index", func() (interface{}, error) {
+		var posts []*Post
+		if err := db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20"); err != nil {
+			return nil, err
+		}
+		if err := makePosts(posts, "", false); err != nil {
+			return nil, err
+		}
+		return posts, nil
+	})
+	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	if err := makePosts(posts, token, false); err != nil {
-		fmt.Println(err)
-		return
+
+	posts := make([]*Post, len(v.([]*Post)))
+	for i, v := range v.([]*Post) {
+		p := *v
+		p.CSRFToken = token
+		posts[i] =  &p
 	}
 
 	indexTmpl.Execute(w, struct {
@@ -692,6 +704,6 @@ func main() {
 	goji.Post("/comment", PostComment)
 	goji.Get("/admin/banned", GetAdminBanned)
 	goji.Post("/admin/banned", PostAdminBanned)
-	// goji.Get("/*", http.FileServer(http.Dir("../public"))) //nginxに任せる
+	//goji.Get("/*", http.FileServer(http.Dir("../public"))) //nginxに任せる
 	goji.Serve()
 }
