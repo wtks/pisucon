@@ -27,7 +27,6 @@ import (
 	"crypto/sha512"
 	"sync"
 	"bytes"
-	"bufio"
 )
 
 var (
@@ -550,7 +549,7 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n, _ := bufio.NewReader(file).WriteTo(saved)
+	n, _ := io.Copy(saved, file)
 	file.Close()
 	if n > UploadLimit {
 		s.Values["notice"] = "ファイルサイズが大きすぎます"
