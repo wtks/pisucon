@@ -314,34 +314,31 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 
 	token := getCSRFToken(s)
 
-	v, err, _ := group.Do("index", func() (interface{}, error) {
+	posts, err, _ := group.Do("index", func() (interface{}, error) {
 		var posts []*Post
 		if err := db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20"); err != nil {
 			return nil, err
 		}
-		if err := makePosts(posts, "", false); err != nil {
+		if err := makePosts(posts, "[C5RF7OK3N]", false); err != nil {
 			return nil, err
 		}
-		return posts, nil
+
+		b := strings.Builder{}
+		b.Grow(2 << 16)
+		postsTmpl.Execute(&b, posts)
+		return b.String(), nil
 	})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	posts := make([]*Post, len(v.([]*Post)))
-	for i, v := range v.([]*Post) {
-		p := *v
-		p.CSRFToken = token
-		posts[i] =  &p
-	}
-
 	indexTmpl.Execute(w, struct {
-		Posts     []*Post
+		Posts     string
 		Me        User
 		CSRFToken string
 		Flash     string
-	}{posts, *me, token, getFlash(s, w, r, "notice")})
+	}{strings.Replace(posts.(string), "[C5RF7OK3N]", token, -1), *me, token, getFlash(s, w, r, "notice")})
 }
 
 func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
