@@ -676,7 +676,7 @@ func main() {
 	}
 
 	dsn := fmt.Sprintf(
-		"%s:%s@unix(/var/run/mysqld/mysqld.sock)/%s?charset=utf8mb4&parseTime=true&loc=Local",
+		"%s:%s@unix(/var/run/mysqld/mysqld.sock)/%s?charset=utf8mb4&parseTime=true&loc=Local&interpolateParams=true",
 		user,
 		password,
 		dbname,
@@ -684,6 +684,8 @@ func main() {
 
 	var err error
 	db, err = sqlx.Open("mysql", dsn)
+	db.SetMaxIdleConns(8)
+	db.SetMaxOpenConns(8)
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
