@@ -26,14 +26,18 @@ import (
 	"github.com/zenazn/goji/web"
 	"crypto/sha512"
 	"sync"
+	"bytes"
 )
 
 var (
 	db    *sqlx.DB
 	store *gsm.MemcacheStore
 
-	indexPostsMutex sync.RWMutex
-	indexPosts strings.Builder
+	indexPostsMutex      sync.RWMutex
+	indexPosts           []byte
+	indexPostsTime       time.Time
+	indexPostsTimeMutex  sync.Mutex
+	csrfTokenPlaceholder = []byte("[C5RF7OK3N]")
 
 	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
 	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
@@ -186,9 +190,9 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 		"DELETE FROM comments WHERE id > 100000",
 		"UPDATE users SET del_flg = 0",
 		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
-		//"UPDATE posts SET mime = 'jpg' WHERE mime = 'image/jpeg'",
-		//"UPDATE posts SET mime = 'png' WHERE mime = 'image/png'",
-		//"UPDATE posts SET mime = 'gif' WHERE mime = 'image/gif'",
+		// "UPDATE posts SET mime = 'jpg' WHERE mime = 'image/jpeg'",
+		// "UPDATE posts SET mime = 'png' WHERE mime = 'image/png'",
+		// "UPDATE posts SET mime = 'gif' WHERE mime = 'image/gif'",
 	}
 
 	for _, sql := range sqls {
@@ -308,14 +312,26 @@ func GetLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func makeIndexPostsHtml() {
-	indexPostsMutex.Lock()
+	now := time.Now()
+	indexPostsTimeMutex.Lock()
+	if indexPostsTime.After(now) {
+		indexPostsTimeMutex.Unlock()
+		return
+	}
+	now = time.Now()
+
 	var posts []*Post
 	db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20")
 	makePosts(posts, "[C5RF7OK3N]", false)
-	indexPosts.Reset()
-	indexPosts.Grow(2 << 16)
-	postsTmpl.Execute(&indexPosts, posts)
+	b := bytes.Buffer{}
+	b.Grow(2 << 16)
+	postsTmpl.Execute(&b, posts)
+
+	indexPostsTime = now
+	indexPostsMutex.Lock()
+	indexPosts = b.Bytes()
 	indexPostsMutex.Unlock()
+	indexPostsTimeMutex.Unlock()
 }
 
 func GetIndex(w http.ResponseWriter, r *http.Request) {
@@ -326,10 +342,10 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	token := getCSRFToken(s)
 	indexPostsMutex.RLock()
-	posts := template.HTML(strings.Replace(indexPosts.String(), "[C5RF7OK3N]", token, -1))
+	posts := template.HTML(bytes.Replace(indexPosts, csrfTokenPlaceholder, []byte(token), -1))
 	indexPostsMutex.RUnlock()
 
-	indexTmpl.Execute(w, struct {
+	indexTmpl.Execute(w, &struct {
 		Posts     template.HTML
 		Me        User
 		CSRFToken string
@@ -699,6 +715,6 @@ func main() {
 	goji.Post("/comment", PostComment)
 	goji.Get("/admin/banned", GetAdminBanned)
 	goji.Post("/admin/banned", PostAdminBanned)
-	//goji.Get("/*", http.FileServer(http.Dir("../public"))) //nginxに任せる
+	// goji.Get("/*", http.FileServer(http.Dir("../public"))) //nginxに任せる
 	goji.Serve()
 }
