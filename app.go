@@ -574,9 +574,11 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	saved.Close()
+	saved.Chmod(os.ModePerm)
 	if err := os.Rename(saved.Name(), fmt.Sprintf("../public/image/%d.%s", pid, ext)); err != nil {
 		panic(err)
 	}
+
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 	commentsCountMap.Store(int(pid), &CommentCount{PostID: int(pid)})
