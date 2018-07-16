@@ -27,6 +27,7 @@ import (
 	"crypto/sha512"
 	"sync"
 	"bytes"
+	"bufio"
 )
 
 var (
@@ -544,16 +545,20 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filedata, rerr := ioutil.ReadAll(file)
-	if rerr != nil {
-		fmt.Println(rerr.Error())
+	saved, err := ioutil.TempFile("./temp", "temp-")
+	if err != nil {
+		return
 	}
 
-	if len(filedata) > UploadLimit {
+	n, _ := bufio.NewReader(file).WriteTo(saved)
+	file.Close()
+	if n > UploadLimit {
 		s.Values["notice"] = "ファイルサイズが大きすぎます"
 		s.Save(r, w)
-
 		http.Redirect(w, r, "/", http.StatusFound)
+
+		saved.Close()
+		os.Remove(saved.Name())
 		return
 	}
 
@@ -569,12 +574,14 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := ioutil.WriteFile(fmt.Sprintf("../public/image/%d.%s", pid, ext), filedata, os.ModePerm); err != nil {
+	saved.Close()
+	if err := os.Rename(saved.Name(), fmt.Sprintf("../public/image/%d.%s", pid, ext)); err != nil {
 		panic(err)
 	}
 
-	makeIndexPostsHtml()
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
+	commentsCountMap.Store(int(pid), &CommentCount{PostID: int(pid)})
+	makeIndexPostsHtml()
 	return
 }
 
@@ -641,8 +648,8 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 		c.(*CommentCount).Count++
 	}
 
-	makeIndexPostsHtml()
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
+	makeIndexPostsHtml()
 }
 
 func GetAdminBanned(w http.ResponseWriter, r *http.Request) {
@@ -707,8 +714,8 @@ func PostAdminBanned(w http.ResponseWriter, r *http.Request) {
 
 	db.Exec(q, vs...)
 
-	makeIndexPostsHtml()
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
+	makeIndexPostsHtml()
 }
 
 func main() {
