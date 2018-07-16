@@ -25,14 +25,15 @@ import (
 	"github.com/zenazn/goji"
 	"github.com/zenazn/goji/web"
 	"crypto/sha512"
-	"golang.org/x/sync/singleflight"
+	"sync"
 )
 
 var (
 	db    *sqlx.DB
 	store *gsm.MemcacheStore
 
-	group singleflight.Group
+	indexPostsMutex sync.RWMutex
+	indexPosts strings.Builder
 
 	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
 	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
@@ -194,6 +195,7 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 		db.Exec(sql)
 	}
 
+	makeIndexPostsHtml()
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -305,40 +307,34 @@ func GetLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+func makeIndexPostsHtml() {
+	indexPostsMutex.Lock()
+	var posts []*Post
+	db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20")
+	makePosts(posts, "[C5RF7OK3N]", false)
+	indexPosts.Reset()
+	indexPosts.Grow(2 << 16)
+	postsTmpl.Execute(&indexPosts, posts)
+	indexPostsMutex.Unlock()
+}
+
 func GetIndex(w http.ResponseWriter, r *http.Request) {
 	s := getSession(r)
 	me := getSessionUser(s)
 	if me == nil {
 		me = &User{}
 	}
-
 	token := getCSRFToken(s)
-
-	posts, err, _ := group.Do("index", func() (interface{}, error) {
-		var posts []*Post
-		if err := db.Select(&posts, getPostsQuery+" ORDER BY posts.created_at DESC LIMIT 20"); err != nil {
-			return nil, err
-		}
-		if err := makePosts(posts, "[C5RF7OK3N]", false); err != nil {
-			return nil, err
-		}
-
-		b := strings.Builder{}
-		b.Grow(2 << 16)
-		postsTmpl.Execute(&b, posts)
-		return b.String(), nil
-	})
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	indexPostsMutex.RLock()
+	posts := template.HTML(strings.Replace(indexPosts.String(), "[C5RF7OK3N]", token, -1))
+	indexPostsMutex.RUnlock()
 
 	indexTmpl.Execute(w, struct {
-		Posts     string
+		Posts     template.HTML
 		Me        User
 		CSRFToken string
 		Flash     string
-	}{strings.Replace(posts.(string), "[C5RF7OK3N]", token, -1), *me, token, getFlash(s, w, r, "notice")})
+	}{posts, *me, token, getFlash(s, w, r, "notice")})
 }
 
 func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
@@ -538,7 +534,7 @@ func PostIndex(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 
-	group.Forget("index")
+	makeIndexPostsHtml()
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 	return
 }
@@ -602,7 +598,7 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 
 	db.Exec("INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)", postID, me.ID, r.FormValue("comment"))
 
-	group.Forget("index")
+	makeIndexPostsHtml()
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
@@ -657,7 +653,7 @@ func PostAdminBanned(w http.ResponseWriter, r *http.Request) {
 
 	db.Exec(q, vs...)
 
-	group.Forget("index")
+	makeIndexPostsHtml()
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
