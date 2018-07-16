@@ -39,8 +39,9 @@ var (
 	indexPostsTimeMutex  sync.Mutex
 	csrfTokenPlaceholder = []byte("[C5RF7OK3N]")
 
-	usersMap   sync.Map
-	usersIdMap sync.Map
+	usersMap         sync.Map
+	usersIdMap       sync.Map
+	commentsCountMap sync.Map
 
 	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
 	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
@@ -93,6 +94,11 @@ type Comment struct {
 	Comment   string    `db:"comment"`
 	CreatedAt time.Time `db:"created_at"`
 	User      User      `db:"u"`
+}
+
+type CommentCount struct {
+	PostID int `db:"post_id"`
+	Count  int `db:"count"`
 }
 
 func init() {
@@ -154,10 +160,8 @@ func makePosts(results []*Post, CSRFToken string, allComments bool) error {
 		if allComments {
 			p.CommentCount = len(p.Comments)
 		} else {
-			err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-			if err != nil {
-				return err
-			}
+			v, _ := commentsCountMap.LoadOrStore(p.ID, &CommentCount{PostID: p.ID})
+			p.CommentCount = v.(*CommentCount).Count
 		}
 
 		p.CSRFToken = CSRFToken
@@ -209,6 +213,12 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 	for _, v := range users {
 		usersMap.Store(v.AccountName, v)
 		usersIdMap.Store(v.ID, v)
+	}
+
+	var counts []*CommentCount
+	db.Select(&counts, "SELECT post_id, COUNT(*) AS count FROM comments GROUP BY post_id")
+	for _, v := range counts {
+		commentsCountMap.Store(v.PostID, v)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -316,9 +326,9 @@ func PostRegister(w http.ResponseWriter, r *http.Request) {
 	s.Save(r, w)
 
 	u := &User{
-		ID: int(uid),
-		AccountName:accountName,
-		Passhash:passhash,
+		ID:          int(uid),
+		AccountName: accountName,
+		Passhash:    passhash,
 	}
 	usersIdMap.Store(u.ID, u)
 	usersMap.Store(u.AccountName, u)
@@ -406,21 +416,9 @@ func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	commentedCount := 0
 	if postCount > 0 {
-		var s []string
-		for range postIDs {
-			s = append(s, "?")
-		}
-		placeholder := strings.Join(s, ", ")
-
-		// convert []int -> []interface{}
-		args := make([]interface{}, len(postIDs))
-		for i, v := range postIDs {
-			args[i] = v
-		}
-
-		if err := db.Get(&commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...); err != nil {
-			fmt.Println(err)
-			return
+		for _, v := range postIDs {
+			c, _ := commentsCountMap.LoadOrStore(v, &CommentCount{PostID: v})
+			commentedCount += c.(*CommentCount).Count
 		}
 	}
 
@@ -638,6 +636,10 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.Exec("INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)", postID, me.ID, r.FormValue("comment"))
+	c, loaded := commentsCountMap.LoadOrStore(postID, &CommentCount{PostID: postID, Count: 1})
+	if loaded {
+		c.(*CommentCount).Count++
+	}
 
 	makeIndexPostsHtml()
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
