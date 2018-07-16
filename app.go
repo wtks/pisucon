@@ -39,6 +39,9 @@ var (
 	indexPostsTimeMutex  sync.Mutex
 	csrfTokenPlaceholder = []byte("[C5RF7OK3N]")
 
+	usersMap   sync.Map
+	usersIdMap sync.Map
+
 	usernameRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{3,}\\z")
 	passwordRegexp = regexp.MustCompile("\\A[0-9a-zA-Z_]{6,}\\z")
 
@@ -117,11 +120,11 @@ func getSessionUser(s *sessions.Session) *User {
 		return nil
 	}
 
-	u := &User{}
-	if db.Get(u, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", uid) != nil {
+	v, ok := usersIdMap.Load(uid)
+	if !ok {
 		return nil
 	}
-	return u
+	return v.(*User)
 }
 
 func getFlash(s *sessions.Session, w http.ResponseWriter, r *http.Request, key string) string {
@@ -200,6 +203,14 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	makeIndexPostsHtml()
+
+	var users []*User
+	db.Select(&users, "SELECT * FROM users")
+	for _, v := range users {
+		usersMap.Store(v.AccountName, v)
+		usersIdMap.Store(v.ID, v)
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -225,10 +236,17 @@ func PostLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	accountName, password := r.FormValue("account_name"), r.FormValue("password")
-	u := &User{}
-	db.Get(u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0 LIMIT 1", accountName)
 
-	if calculatePasshash(u.AccountName, password) != u.Passhash {
+	v, ok := usersMap.Load(accountName)
+	if !ok {
+		s.Values["notice"] = "アカウント名かパスワードが間違っています"
+		s.Save(r, w)
+
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	u := v.(*User)
+	if u.DelFlg != 0 || calculatePasshash(u.AccountName, password) != u.Passhash {
 		s.Values["notice"] = "アカウント名かパスワードが間違っています"
 		s.Save(r, w)
 
@@ -272,11 +290,8 @@ func PostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exists := 0
-	// ユーザーが存在しない場合はエラーになるのでエラーチェックはしない
-	db.Get(&exists, "SELECT 1 FROM users WHERE `account_name` = ? LIMIT 1", accountName)
-
-	if exists == 1 {
+	_, ok := usersMap.Load(accountName)
+	if ok {
 		s.Values["notice"] = "アカウント名がすでに使われています"
 		s.Save(r, w)
 
@@ -284,7 +299,8 @@ func PostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, eerr := db.Exec("INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)", accountName, calculatePasshash(accountName, password))
+	passhash := calculatePasshash(accountName, password)
+	result, eerr := db.Exec("INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)", accountName, passhash)
 	if eerr != nil {
 		fmt.Println(eerr.Error())
 		return
@@ -295,9 +311,17 @@ func PostRegister(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(lerr.Error())
 		return
 	}
-	s.Values["user_id"] = uid
+	s.Values["user_id"] = int(uid)
 	s.Values["csrf_token"] = secureRandomStr(16)
 	s.Save(r, w)
+
+	u := &User{
+		ID: int(uid),
+		AccountName:accountName,
+		Passhash:passhash,
+	}
+	usersIdMap.Store(u.ID, u)
+	usersMap.Store(u.AccountName, u)
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -354,12 +378,13 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
-	user := &User{}
-	if err := db.Get(user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0 LIMIT 1", c.URLParams["accountName"]); err != nil {
-		fmt.Println(err)
+	v, ok := usersMap.Load(c.URLParams["accountName"])
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	if user.ID == 0 {
+	user := v.(*User)
+	if user.DelFlg != 0 {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -662,7 +687,18 @@ func PostAdminBanned(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.ParseForm()
-	q, vs, err := sqlx.In("UPDATE `users` SET `del_flg` = 1 WHERE `id` IN (?)", r.Form["uid[]"])
+	var uids []int
+	for _, v := range r.Form["uid[]"] {
+		uid, err := strconv.Atoi(v)
+		if err != nil {
+			u, ok := usersIdMap.Load(uid)
+			if ok {
+				u.(*User).DelFlg = 1
+				uids = append(uids, uid)
+			}
+		}
+	}
+	q, vs, err := sqlx.In("UPDATE `users` SET `del_flg` = 1 WHERE `id` IN (?)", uids)
 	if err != nil {
 		panic(err)
 	}
